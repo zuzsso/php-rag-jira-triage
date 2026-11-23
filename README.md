@@ -48,7 +48,8 @@ Please avoid executing this script unnecessarily to minimise the load on Atlassi
 
 Launch it with the following command: 
 
-`$ <PROJECT_DIR>/bash_scripts/ingest/ingest_fixtures_and_create_embeddings.sh`
+`$ <PROJECT_DIR>/bash_scripts/fixture_generation/create_jira_ticket_fixture_file.sh`
+
 
 The command will fail if the database already contains records. Pass the `--force` flag to truncate the existing table and create new embeddings
 
