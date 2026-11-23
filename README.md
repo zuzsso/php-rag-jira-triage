@@ -270,27 +270,27 @@ Result:
 * **Chunking Strategy (`DocumentChunker` with overlapping windows):** Real Jira tickets contain verbose stack traces, reproduction steps, and engineer resolution comments. Slicing tickets into bounded character windows with word-boundary alignment and overlap (`120–150` chars) prevents semantic dilution across long logs while ensuring key context is never severed mid-sentence at a chunk boundary.
 
 ### 2. How do you preserve relationships between retrieved chunks and their original Jira tickets?
-Each row in `jira_knowledge_chunks` stores structured relational metadata (`ticket_key`, `title`, `resolution`, `chunk_index`) alongside the raw text slice and its `VECTOR(768)` column inside InnoDB. When `VectorRepository` executes an Approximate Nearest Neighbor (ANN) query against the HNSW index, it hydrates an immutable `EmbeddedTicketChunkDTO` containing both the cosine distance and the parent ticket's identifiers—allowing the CLI/UI to display direct, verifiable links back to `https://atlassian.com{ticket_key}`.
+Each row in `jira_knowledge_chunks` stores structured relational metadata (`ticket_key`, `title`, `resolution`, `chunk_index`) alongside the raw text slice and its `VECTOR(768)` column inside InnoDB. When `FindVectors` executes an Approximate Nearest Neighbor (ANN) query against the HNSW index, it hydrates an immutable `EmbeddedTicketChunkDtoCollection`, with objects of type `EmbeddedTicketChunkDto` containing both the cosine distance and the parent ticket's identifiers—allowing the CLI/UI to display direct, verifiable links back to `https://jira.atlassian.com/browse/{ticket_key}`.
 
 ### 3. How do you separate ingestion, vector generation, retrieval, and LLM inference?
 Each stage is isolated into single-responsibility components:
-* **Extraction & Ingestion (`bin/fetch_jira.php`, `bin/ingest.php`, `DocumentChunker`):** Runs offline as an idempotent CLI pipeline decoupled from runtime queries.
+* **Extraction & Ingestion (`create_jira_ticket_fixture_file.sh`, `ingest_fixtures_and_create_embeddings.sh`, `ChunkDocument.php`):** Runs offline as an idempotent CLI pipeline decoupled from runtime queries.
 * **Vector Generation & Chat Inference (`LLMProviderInterface` -> `OllamaLocalServerLlm`):** Encapsulates all external HTTP/JSON communication with the model server.
-* **Vector Retrieval (`VectorRepository`):** Encapsulates pure PDO SQL queries against MariaDB's HNSW `VECTOR INDEX` (`VEC_DISTANCE_COSINE`), returning domain DTOs without knowing which LLM generated the vectors.
-* **RAG Orchestration (`TriageService`):** Coordinates embedding -> retrieval -> guardrailed prompt construction -> DTO hydration independently of whether the entry point is a CLI command (`bin/triage.php`) or an HTTP controller.
+* **Vector Retrieval (`FindVectors`):** Encapsulates pure PDO SQL queries against MariaDB's HNSW `VECTOR INDEX` (`VEC_DISTANCE_COSINE`), returning domain DTOs without knowing which LLM generated the vectors.
+* **RAG Orchestration (`TriageServiceInterface`):** Coordinates embedding -> retrieval -> guardrailed prompt construction -> DTO hydration independently of whether the entry point is a CLI command (`triage.sh`) or an HTTP controller.
 
 ### 4. How do you distinguish useful retrieval results from irrelevant ones?
-MariaDB's HNSW index always returns the top-*K* nearest neighbors (`ORDER BY VEC_DISTANCE_COSINE(...) ASC LIMIT :limit`), even if a query has nothing to do with Jira. `VectorRepository` enforces a strict cosine-distance ceiling (`$maxDistance = 0.55`, where `0.0` is identical and `2.0` is opposite). Any chunk exceeding `0.55` is discarded, and confidence scores are computed deterministically from the top match's cosine distance rather than relying on subjective LLM self-assessment.
+MariaDB's HNSW index always returns the top-*K* nearest neighbors (`ORDER BY VEC_DISTANCE_COSINE(...) ASC LIMIT :limit`), even if a query has nothing to do with Jira. `FindVectors` enforces a strict cosine-distance ceiling (`$maxDistance = 0.55`, where `0.0` is identical and `2.0` is opposite). Any chunk exceeding `0.55` is discarded, and confidence scores are computed deterministically from the top match's cosine distance rather than relying on subjective LLM self-assessment.
 
 ### 5. How do you prevent the LLM from presenting unsupported conclusions as facts?
 JiRag enforces multi-layered deterministic and behavioral guardrails:
-* **Pre-Prompt Short-Circuiting:** If no retrieved chunk satisfies `cosineDistance <= 0.55`, `TriageService` bypasses the LLM entirely and returns a deterministic `grounded: false` result.
+* **Pre-Prompt Short-Circuiting:** If no retrieved chunk satisfies `cosineDistance <= 0.55`, `TriageServiceInterface` bypasses the LLM entirely and returns a deterministic `grounded: false` result.
 * **Prompt Boundary Isolation:** Retrieved ticket text is quarantined inside `<context>` XML tags and user input inside `<bug_report>` tags, paired with system-level behavioral rules (`$guardrailedSystemPrompt`) instructing the model to rely *only* on `<context>` and never invent ticket keys.
-* **Schema-Constrained Output:** Chat completions enforce a strict JSON Schema (`$jsonSchema`) and low temperature, forcing structured output into `TriageResultDTO` alongside verifiable source citations.
+* **Schema-Constrained Output:** Chat completions enforce a strict JSON Schema (`$jsonSchema`) and low temperature, forcing structured output into `TriageResult` alongside verifiable source citations.
 
 ### 6. How easily could a different dataset, embedding provider, or LLM be integrated?
-* **Swapping LLMs or Embedding Providers:** Because `TriageService` and `bin/ingest.php` depend exclusively on `LLMProviderInterface`, switching to a remote Ollama server or cloud OpenAI requires only implementing the interface (e.g., `OpenAiClient`), updating a single binding in `config/container.php` (PHP-DI 7), and running `php bin/ingest.php --force` to re-index the local JSON fixture.
-* **Swapping Datasets:** `bin/ingest.php` reads a simple normalized JSON array (`ticket_key`, `title`, `resolution`, `full_text`). Any internal support tickets, Confluence exports, or runbooks formatted into that schema can be ingested with zero changes to the retrieval or triage engine.
+* **Swapping LLMs or Embedding Providers:** Because `TriageServiceInterface` and `ingest_fixtures_and_create_embeddings.sh` depend exclusively on `LLMProviderInterface`, switching to a remote Ollama server or cloud OpenAI requires only implementing the interface (e.g., `OpenAiClient`), updating a single binding in `LLM/LlmDiManifest.php` (PHP-DI 7), and running `ingest_fixtures_and_create_embeddings.sh --force` to re-index the local JSON fixture.
+* **Swapping Datasets:** `ingest_fixtures_and_create_embeddings.sh` reads a simple normalized JSON array (`ticket_key`, `title`, `resolution`, `full_text`). Any internal support tickets, Confluence exports, or runbooks formatted into that schema can be ingested with zero changes to the retrieval or triage engine.
 
 ### 7. Why does JiRag use a command-line interface rather than a web interface?
 
